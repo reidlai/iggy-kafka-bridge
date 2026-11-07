@@ -2,5 +2,31 @@
 name = "iggy-kafka-bridge"
 version = "0.1.0"
 edition = "2024"
+authors = ["FerrousCX Contributors"]
+description = "Pure-Rust Kafka wire protocol bridge to Apache Iggy streaming broker"
+
+[lib]
+name = "iggy_kafka_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iggy-kafka-bridge"
+path = "src/main.rs"
 
 [dependencies]
+tokio = { version = "1.40", features = ["full"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+bytes = "1.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+toml = "0.8"
+indexmap = "2.0"
+kafka-protocol = { version = "0.18", features = ["broker", "messages_enums"] }
+iggy = "0.11"
+
+[dev-dependencies]
+tempfile = "3.12"
+
