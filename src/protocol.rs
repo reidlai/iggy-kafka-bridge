@@ -65,6 +65,10 @@ pub async fn process_frame<B: IggyBackend>(
             let resp = state.handle_offset_fetch(req, api_version).await;
             ResponseKind::OffsetFetch(resp)
         }
+        RequestKind::Produce(ref req) => {
+            let resp = state.handle_produce(req, api_version).await;
+            ResponseKind::Produce(resp)
+        }
         other => {
             warn!("Unhandled RequestKind: {:?}", other);
             return Err(format!("Unhandled RequestKind: {:?}", api_key).into());

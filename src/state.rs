@@ -8,6 +8,7 @@ use kafka_protocol::messages::list_offsets_response::{ListOffsetsPartitionRespon
 use kafka_protocol::messages::metadata_response::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 use kafka_protocol::messages::offset_commit_response::{OffsetCommitResponsePartition, OffsetCommitResponseTopic};
 use kafka_protocol::messages::offset_fetch_response::{OffsetFetchResponsePartition, OffsetFetchResponseTopic};
+use kafka_protocol::messages::produce_response::{PartitionProduceResponse, TopicProduceResponse};
 use kafka_protocol::messages::*;
 use kafka_protocol::protocol::StrBytes;
 use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType};
@@ -504,6 +505,130 @@ impl<B: IggyBackend> BridgeState<B> {
                 }
                 resp.topics.push(topic_resp);
             }
+        }
+
+        resp
+    }
+
+    pub async fn handle_produce(&self, req: &ProduceRequest, _version: i16) -> ProduceResponse {
+        let mut resp = ProduceResponse::default();
+        let topic_map = self.registry.topic_map();
+
+        for topic_data in &req.topic_data {
+            let topic_name_str = topic_data.name.0.as_str();
+            let mut topic_resp = TopicProduceResponse::default();
+            topic_resp.name = topic_data.name.clone();
+
+            if let Some(entry) = topic_map.get(topic_name_str) {
+                if !entry.kafka.produce {
+                    // Unauthorized produce per Contract Sheet Section 4 & Acceptance Criteria
+                    for part_data in &topic_data.partition_data {
+                        let mut part_resp = PartitionProduceResponse::default();
+                        part_resp.index = part_data.index;
+                        part_resp.error_code = ERROR_UNKNOWN_TOPIC_OR_PARTITION;
+                        part_resp.base_offset = -1;
+                        part_resp.log_append_time_ms = -1;
+                        part_resp.log_start_offset = -1;
+                        topic_resp.partition_responses.push(part_resp);
+                    }
+                } else {
+                    for part_data in &topic_data.partition_data {
+                        let mut part_resp = PartitionProduceResponse::default();
+                        part_resp.index = part_data.index;
+
+                        if part_data.index < 0 || part_data.index >= entry.partitions as i32 {
+                            part_resp.error_code = ERROR_UNKNOWN_TOPIC_OR_PARTITION;
+                            part_resp.base_offset = -1;
+                            part_resp.log_append_time_ms = -1;
+                            part_resp.log_start_offset = -1;
+                        } else if let Some(records_bytes) = &part_data.records {
+                            let mut rec_slice = records_bytes.clone();
+                            match kafka_protocol::records::RecordBatchDecoder::decode_all(&mut rec_slice) {
+                                Ok(batches) => {
+                                    let mut messages = Vec::new();
+                                    for batch in batches {
+                                        for rec in batch.records {
+                                            let mut headers = std::collections::HashMap::new();
+                                            for (k, v) in rec.headers {
+                                                if let Some(val) = v {
+                                                    headers.insert(k.to_string(), val);
+                                                }
+                                            }
+                                            if let Some(ref key) = rec.key {
+                                                headers.insert("kafka.key".to_string(), key.clone());
+                                            }
+                                            headers.insert("kafka.v".to_string(), bytes::Bytes::from_static(b"\x01"));
+
+                                            messages.push(crate::backend::BridgeMessage {
+                                                offset: 0,
+                                                timestamp_ms: rec.timestamp,
+                                                key: rec.key,
+                                                payload: rec.value.unwrap_or_default(),
+                                                headers,
+                                            });
+                                        }
+                                    }
+                                    if messages.is_empty() {
+                                        part_resp.error_code = ERROR_NONE;
+                                        part_resp.base_offset = 0;
+                                        part_resp.log_append_time_ms = -1;
+                                        part_resp.log_start_offset = 0;
+                                    } else {
+                                        match self
+                                            .backend
+                                            .send_messages(
+                                                &entry.stream,
+                                                &entry.topic,
+                                                part_data.index as u32,
+                                                messages,
+                                            )
+                                            .await
+                                        {
+                                            Ok(base_offset) => {
+                                                part_resp.error_code = ERROR_NONE;
+                                                part_resp.base_offset = base_offset as i64;
+                                                part_resp.log_append_time_ms = -1;
+                                                part_resp.log_start_offset = 0;
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to produce messages: {e}");
+                                                part_resp.error_code = ERROR_UNKNOWN_TOPIC_OR_PARTITION;
+                                                part_resp.base_offset = -1;
+                                                part_resp.log_append_time_ms = -1;
+                                                part_resp.log_start_offset = -1;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to decode produced record batches: {e}");
+                                    part_resp.error_code = ERROR_OFFSET_OUT_OF_RANGE;
+                                    part_resp.base_offset = -1;
+                                    part_resp.log_append_time_ms = -1;
+                                    part_resp.log_start_offset = -1;
+                                }
+                            }
+                        } else {
+                            part_resp.error_code = ERROR_NONE;
+                            part_resp.base_offset = 0;
+                            part_resp.log_append_time_ms = -1;
+                            part_resp.log_start_offset = 0;
+                        }
+                        topic_resp.partition_responses.push(part_resp);
+                    }
+                }
+            } else {
+                for part_data in &topic_data.partition_data {
+                    let mut part_resp = PartitionProduceResponse::default();
+                    part_resp.index = part_data.index;
+                    part_resp.error_code = ERROR_UNKNOWN_TOPIC_OR_PARTITION;
+                    part_resp.base_offset = -1;
+                    part_resp.log_append_time_ms = -1;
+                    part_resp.log_start_offset = -1;
+                    topic_resp.partition_responses.push(part_resp);
+                }
+            }
+            resp.responses.push(topic_resp);
         }
 
         resp

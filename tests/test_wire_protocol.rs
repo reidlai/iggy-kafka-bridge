@@ -265,4 +265,61 @@ async fn test_tcp_wire_handshake_and_consume() {
     let _ = ResponseHeader::decode(&mut unknown_resp, ApiKey::Metadata.response_header_version(9)).unwrap();
     let unknown_meta = MetadataResponse::decode(&mut unknown_resp, 9).unwrap();
     assert_eq!(unknown_meta.topics[0].error_code, 3);
+
+    // 8. Produce v7 to olist.orders_stream (produce: true)
+    let mut rec_buf = BytesMut::new();
+    let rec = kafka_protocol::records::Record {
+        transactional: false,
+        control: false,
+        delete_horizon: false,
+        partition_leader_epoch: -1,
+        producer_id: -1,
+        producer_epoch: -1,
+        timestamp_type: kafka_protocol::records::TimestampType::Creation,
+        offset: 0,
+        sequence: 0,
+        timestamp: 1620000010000,
+        key: Some(Bytes::from("order-olist-001")),
+        value: Some(Bytes::from("{\"order_id\":\"order-olist-001\",\"price\":49.99}")),
+        headers: Default::default(),
+    };
+    let options = kafka_protocol::records::RecordEncodeOptions {
+        version: 2,
+        compression: kafka_protocol::records::Compression::None,
+    };
+    kafka_protocol::records::RecordBatchEncoder::encode(&mut rec_buf, &[rec], &options).unwrap();
+
+    let mut produce_resp = send_kafka_request(&mut client, ApiKey::Produce, 7, 109, |buf| {
+        let mut req = ProduceRequest::default();
+        req.acks = -1;
+        req.timeout_ms = 30000;
+        let mut td = produce_request::TopicProduceData::default();
+        td.name = TopicName("olist.orders_stream".into());
+        let mut pd = produce_request::PartitionProduceData::default();
+        pd.index = 0;
+        pd.records = Some(rec_buf.freeze());
+        td.partition_data.push(pd);
+        req.topic_data.push(td);
+        req.encode(buf, 7).unwrap();
+    }).await;
+    let _ = ResponseHeader::decode(&mut produce_resp, ApiKey::Produce.response_header_version(7)).unwrap();
+    let produce = ProduceResponse::decode(&mut produce_resp, 7).unwrap();
+    assert_eq!(produce.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(produce.responses[0].partition_responses[0].base_offset, 0);
+
+    // 9. Unauthorized produce rejection on orders.intake (produce: false)
+    let mut unauth_produce_resp = send_kafka_request(&mut client, ApiKey::Produce, 7, 110, |buf| {
+        let mut req = ProduceRequest::default();
+        req.acks = -1;
+        let mut td = produce_request::TopicProduceData::default();
+        td.name = TopicName("orders.intake".into());
+        let mut pd = produce_request::PartitionProduceData::default();
+        pd.index = 0;
+        td.partition_data.push(pd);
+        req.topic_data.push(td);
+        req.encode(buf, 7).unwrap();
+    }).await;
+    let _ = ResponseHeader::decode(&mut unauth_produce_resp, ApiKey::Produce.response_header_version(7)).unwrap();
+    let unauth_produce = ProduceResponse::decode(&mut unauth_produce_resp, 7).unwrap();
+    assert_eq!(unauth_produce.responses[0].partition_responses[0].error_code, 3);
 }

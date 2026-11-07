@@ -62,6 +62,14 @@ pub trait IggyBackend: Send + Sync {
         topic: &str,
         partition_id: u32,
     ) -> impl std::future::Future<Output = Result<Option<u64>, BridgeError>> + Send;
+
+    fn send_messages(
+        &self,
+        stream: &str,
+        topic: &str,
+        partition_id: u32,
+        messages: Vec<BridgeMessage>,
+    ) -> impl std::future::Future<Output = Result<u64, BridgeError>> + Send;
 }
 
 /// In-memory mock backend for deterministic unit and wire contract testing.
@@ -214,6 +222,31 @@ impl IggyBackend for MockIggyBackend {
             topic.to_string(),
             partition_id,
         )).copied())
+    }
+
+    async fn send_messages(
+        &self,
+        stream: &str,
+        topic: &str,
+        partition_id: u32,
+        messages: Vec<BridgeMessage>,
+    ) -> Result<u64, BridgeError> {
+        let mut state = self.inner.write().await;
+        let partitions = state
+            .topics
+            .get_mut(&(stream.to_string(), topic.to_string()))
+            .ok_or_else(|| BridgeError::TopicNotFound(format!("{stream}/{topic}")))?;
+
+        let p = partitions
+            .get_mut(partition_id as usize)
+            .ok_or_else(|| BridgeError::PartitionNotFound(format!("{stream}/{topic}"), partition_id))?;
+
+        let base_offset = p.len() as u64;
+        for mut m in messages {
+            m.offset = p.len() as u64;
+            p.push(m);
+        }
+        Ok(base_offset)
     }
 }
 
@@ -379,5 +412,64 @@ impl IggyBackend for LiveIggyBackend {
             Ok(None) => Ok(None),
             Err(e) => Err(BridgeError::CommunicationError(e.to_string())),
         }
+    }
+
+    async fn send_messages(
+        &self,
+        stream: &str,
+        topic: &str,
+        partition_id: u32,
+        messages: Vec<BridgeMessage>,
+    ) -> Result<u64, BridgeError> {
+        use std::collections::BTreeMap;
+        let stream_id = Identifier::named(stream)
+            .map_err(|e| BridgeError::TopicNotFound(format!("{stream}: {e}")))?;
+        let topic_id = Identifier::named(topic)
+            .map_err(|e| BridgeError::TopicNotFound(format!("{topic}: {e}")))?;
+
+        let mut iggy_messages = Vec::with_capacity(messages.len());
+        for m in messages {
+            let mut headers_map = BTreeMap::new();
+            for (k, v) in m.headers {
+                if let (Ok(key), Ok(val)) = (
+                    HeaderKey::try_from(k.as_str()),
+                    HeaderValue::try_from(v.as_ref()),
+                ) {
+                    headers_map.insert(key, val);
+                }
+            }
+            let mut iggy_msg = if headers_map.is_empty() {
+                IggyMessage::builder().payload(m.payload).build()
+            } else {
+                IggyMessage::builder()
+                    .payload(m.payload)
+                    .user_headers(headers_map)
+                    .build()
+            }
+            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+            iggy_msg.header.origin_timestamp = (m.timestamp_ms * 1000) as u64;
+            iggy_messages.push(iggy_msg);
+        }
+
+        let partitioning = Partitioning::partition_id(partition_id);
+        self.client
+            .send_messages(&stream_id, &topic_id, &partitioning, &mut iggy_messages)
+            .await
+            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+
+        let topic_details = self
+            .client
+            .get_topic(&stream_id, &topic_id)
+            .await
+            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?
+            .ok_or_else(|| BridgeError::TopicNotFound(format!("{stream}/{topic}")))?;
+        let current_offset = topic_details
+            .partitions
+            .iter()
+            .find(|p| p.id == partition_id)
+            .map(|p| p.current_offset)
+            .unwrap_or(0);
+        let base_offset = current_offset.saturating_sub(iggy_messages.len() as u64);
+        Ok(base_offset)
     }
 }
