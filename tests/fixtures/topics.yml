@@ -1,0 +1,41 @@
+version: 1
+topics:
+  - stream: orders
+    topic: intake
+    kafka_name: orders.intake
+    partitions: 4
+    retention: none
+    durability: replicated
+    kafka:
+      consume: [cg-arroyo-raw]
+      produce: false
+
+  - stream: orders
+    topic: consolidated
+    kafka_name: orders.consolidated
+    partitions: 4
+    retention: none
+    durability: replicated
+    kafka:
+      consume: [cg-arroyo-state]
+      produce: false
+
+  - stream: olist
+    topic: orders_stream
+    kafka_name: olist.orders_stream
+    partitions: 4
+    retention: none
+    durability: persisted
+    kafka:
+      consume: [cg-arroyo-olist]
+      produce: true
+
+  - stream: benchmark
+    topic: hpc_mqbench
+    kafka_name: benchmark.hpc_mqbench
+    partitions: 4
+    retention: none
+    durability: persisted
+    kafka:
+      consume: [cg-arroyo-benchmark]
+      produce: true
