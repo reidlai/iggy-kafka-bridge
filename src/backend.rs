@@ -370,7 +370,12 @@ impl IggyBackend for LiveIggyBackend {
             .ok_or_else(|| BridgeError::TopicNotFound(format!("{stream}/{topic}")))?;
         for p in &topic_details.partitions {
             if p.id == partition_id {
-                return Ok((0, p.current_offset));
+                let high_watermark = if p.messages_count == 0 {
+                    0
+                } else {
+                    p.current_offset + 1
+                };
+                return Ok((0, high_watermark));
             }
         }
         Err(BridgeError::PartitionNotFound(
@@ -393,16 +398,19 @@ impl IggyBackend for LiveIggyBackend {
             .map_err(|e| BridgeError::TopicNotFound(format!("{topic}: {e}")))?;
         let consumer = Consumer::default();
         let strategy = PollingStrategy::offset(offset);
+        let options = PollOptions {
+            count,
+            ..PollOptions::default()
+        };
         let polled = self
             .next_client()
             .poll_messages(
                 &stream_id,
                 &topic_id,
-                Some(partition_id),
+                partition_id,
                 &consumer,
                 &strategy,
-                count,
-                false,
+                options,
             )
             .await
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
@@ -446,20 +454,33 @@ impl IggyBackend for LiveIggyBackend {
             .map_err(|e| BridgeError::TopicNotFound(format!("{stream}: {e}")))?;
         let topic_id = Identifier::named(topic)
             .map_err(|e| BridgeError::TopicNotFound(format!("{topic}: {e}")))?;
-        let consumer = Consumer::group(
-            Identifier::named(group)
-                .map_err(|e| BridgeError::CommunicationError(e.to_string()))?,
-        );
-        self.next_client()
+        let group_id = Identifier::named(group)
+            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+        let ext_consumer = Consumer::external_group(group_id.clone());
+        let client = self.next_client();
+        if client
             .store_consumer_offset(
-                &consumer,
+                &ext_consumer,
                 &stream_id,
                 &topic_id,
                 Some(partition_id),
                 offset,
             )
             .await
-            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+            .is_err()
+        {
+            let regular_consumer = Consumer::new(group_id);
+            client
+                .store_consumer_offset(
+                    &regular_consumer,
+                    &stream_id,
+                    &topic_id,
+                    Some(partition_id),
+                    offset,
+                )
+                .await
+                .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -474,18 +495,35 @@ impl IggyBackend for LiveIggyBackend {
             .map_err(|e| BridgeError::TopicNotFound(format!("{stream}: {e}")))?;
         let topic_id = Identifier::named(topic)
             .map_err(|e| BridgeError::TopicNotFound(format!("{topic}: {e}")))?;
-        let consumer = Consumer::group(
-            Identifier::named(group)
-                .map_err(|e| BridgeError::CommunicationError(e.to_string()))?,
-        );
-        match self
-            .next_client()
-            .get_consumer_offset(&consumer, &stream_id, &topic_id, Some(partition_id))
+        let group_id = Identifier::named(group)
+            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+        let ext_consumer = Consumer::external_group(group_id.clone());
+        let client = self.next_client();
+        match client
+            .get_consumer_offset(&ext_consumer, &stream_id, &topic_id, Some(partition_id))
             .await
         {
             Ok(Some(info)) => Ok(Some(info.stored_offset)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(BridgeError::CommunicationError(e.to_string())),
+            Ok(None) => {
+                let regular_consumer = Consumer::new(group_id);
+                match client
+                    .get_consumer_offset(&regular_consumer, &stream_id, &topic_id, Some(partition_id))
+                    .await
+                {
+                    Ok(Some(info)) => Ok(Some(info.stored_offset)),
+                    Ok(None) | Err(_) => Ok(None),
+                }
+            }
+            Err(_) => {
+                let regular_consumer = Consumer::new(group_id);
+                match client
+                    .get_consumer_offset(&regular_consumer, &stream_id, &topic_id, Some(partition_id))
+                    .await
+                {
+                    Ok(Some(info)) => Ok(Some(info.stored_offset)),
+                    Ok(None) | Err(_) => Ok(None),
+                }
+            }
         }
     }
 
@@ -522,29 +560,47 @@ impl IggyBackend for LiveIggyBackend {
                     .build()
             }
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
-            iggy_msg.header.origin_timestamp = (m.timestamp_ms * 1000) as u64;
+            let ts_us = if m.timestamp_ms > 0 {
+                (m.timestamp_ms as u64).saturating_mul(1000)
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64
+            };
+            iggy_msg.header.origin_timestamp = ts_us;
             iggy_messages.push(iggy_msg);
         }
 
         let client = self.next_client();
         let partitioning = Partitioning::partition_id(partition_id);
-        client
+        let send_resp = client
             .send_messages(&stream_id, &topic_id, &partitioning, &mut iggy_messages)
             .await
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+
+        if let Some(conf) = send_resp.confirmations.first() {
+            return Ok(conf.base_offset);
+        }
 
         let topic_details = client
             .get_topic(&stream_id, &topic_id)
             .await
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?
             .ok_or_else(|| BridgeError::TopicNotFound(format!("{stream}/{topic}")))?;
-        let current_offset = topic_details
+        let high_watermark = topic_details
             .partitions
             .iter()
             .find(|p| p.id == partition_id)
-            .map(|p| p.current_offset)
+            .map(|p| {
+                if p.messages_count == 0 {
+                    0
+                } else {
+                    p.current_offset + 1
+                }
+            })
             .unwrap_or(0);
-        let base_offset = current_offset.saturating_sub(iggy_messages.len() as u64);
+        let base_offset = high_watermark.saturating_sub(iggy_messages.len() as u64);
         Ok(base_offset)
     }
 }
