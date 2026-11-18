@@ -2,11 +2,11 @@
 //! and OpenTelemetry Observability (Stories 16.1 & 16.2, FR-34, SM-9).
 
 use bytes::{Bytes, BytesMut};
-use iggy_kafka_bridge::backend::{IggyBackend, MockIggyBackend};
-use iggy_kafka_bridge::config::{resolve_replica_identity, TopicRegistry};
-use iggy_kafka_bridge::protocol::process_frame;
-use iggy_kafka_bridge::state::BridgeState;
-use iggy_kafka_bridge::telemetry::{
+use iggy_kafka_proxy::backend::{IggyBackend, MockIggyBackend};
+use iggy_kafka_proxy::config::{resolve_replica_identity, TopicRegistry};
+use iggy_kafka_proxy::protocol::process_frame;
+use iggy_kafka_proxy::state::BridgeState;
+use iggy_kafka_proxy::telemetry::{
     init_telemetry, run_metrics_server_with_listener, BridgeMetrics, LogFormat, OtelConfig,
     OtelTier,
 };

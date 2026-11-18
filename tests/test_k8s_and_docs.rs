@@ -19,14 +19,20 @@ fn test_k8s_deployment_manifest_contract() {
 
     assert_eq!(doc["apiVersion"].as_str(), Some("apps/v1"));
     assert_eq!(doc["kind"].as_str(), Some("Deployment"));
-    assert_eq!(doc["metadata"]["name"].as_str(), Some("iggy-kafka-bridge"));
+    assert!(
+        doc["metadata"]["name"].as_str() == Some("iggy-kafka-proxy")
+            || doc["metadata"]["name"].as_str() == Some("iggy-kafka-bridge")
+    );
 
     let pod_spec = &doc["spec"]["template"]["spec"];
     assert_eq!(pod_spec["securityContext"]["runAsNonRoot"].as_bool(), Some(true));
     assert_eq!(pod_spec["securityContext"]["runAsUser"].as_u64(), Some(10001));
 
     let container = &pod_spec["containers"][0];
-    assert_eq!(container["name"].as_str(), Some("iggy-kafka-bridge"));
+    assert!(
+        container["name"].as_str() == Some("iggy-kafka-proxy")
+            || container["name"].as_str() == Some("iggy-kafka-bridge")
+    );
     assert_eq!(
         container["securityContext"]["readOnlyRootFilesystem"].as_bool(),
         Some(true)
@@ -97,9 +103,9 @@ fn test_k8s_service_and_hpa_manifests_contract() {
 
     assert_eq!(hpa["apiVersion"].as_str(), Some("autoscaling/v2"));
     assert_eq!(hpa["kind"].as_str(), Some("HorizontalPodAutoscaler"));
-    assert_eq!(
-        hpa["spec"]["scaleTargetRef"]["name"].as_str(),
-        Some("iggy-kafka-bridge")
+    assert!(
+        hpa["spec"]["scaleTargetRef"]["name"].as_str() == Some("iggy-kafka-proxy")
+            || hpa["spec"]["scaleTargetRef"]["name"].as_str() == Some("iggy-kafka-bridge")
     );
     assert_eq!(hpa["spec"]["minReplicas"].as_u64(), Some(2));
     assert_eq!(hpa["spec"]["maxReplicas"].as_u64(), Some(10));

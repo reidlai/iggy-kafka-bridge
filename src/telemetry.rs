@@ -143,7 +143,7 @@ impl OtelConfig {
 /// Initialize the global `tracing` subscriber according to `OtelConfig` (idempotent in tests).
 pub fn init_telemetry(config: &OtelConfig) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "iggy_kafka_bridge=info,info".into());
+        .unwrap_or_else(|_| "iggy_kafka_proxy=info,info".into());
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)

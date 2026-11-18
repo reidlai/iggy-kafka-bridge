@@ -1,12 +1,12 @@
-//! iggy-kafka-bridge CLI binary with multi-replica connection pooling, Kubernetes pod identity resolution,
+//! iggy-kafka-proxy CLI binary with multi-replica connection pooling, Kubernetes pod identity resolution,
 //! and OpenTelemetry observability (Stories 16.1 & 16.2, FR-33, FR-34).
 
 use clap::Parser;
-use iggy_kafka_bridge::backend::{LiveIggyBackend, DEFAULT_IGGY_POOL_SIZE};
-use iggy_kafka_bridge::config::{resolve_replica_identity, TopicRegistry};
-use iggy_kafka_bridge::server::BridgeServer;
-use iggy_kafka_bridge::state::BridgeState;
-use iggy_kafka_bridge::telemetry::{
+use iggy_kafka_proxy::backend::{LiveIggyBackend, DEFAULT_IGGY_POOL_SIZE};
+use iggy_kafka_proxy::config::{resolve_replica_identity, TopicRegistry};
+use iggy_kafka_proxy::server::BridgeServer;
+use iggy_kafka_proxy::state::BridgeState;
+use iggy_kafka_proxy::telemetry::{
     init_telemetry, run_metrics_server, BridgeMetrics, OtelConfig, DEFAULT_METRICS_BIND_ADDR,
 };
 use std::path::PathBuf;
@@ -15,8 +15,8 @@ use tracing::{error, info};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "iggy-kafka-bridge",
-    about = "Horizontally scalable pure-Rust Kafka wire protocol bridge to Apache Iggy streaming broker",
+    name = "iggy-kafka-proxy",
+    about = "Horizontally scalable pure-Rust Kafka wire protocol proxy for Apache Iggy streaming broker",
     version = "0.1.0"
 )]
 struct Args {

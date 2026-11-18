@@ -1,9 +1,9 @@
 //! End-to-end wire protocol contract tests over live TCP loopback.
 
 use bytes::{BufMut, Bytes, BytesMut};
-use iggy_kafka_bridge::backend::MockIggyBackend;
-use iggy_kafka_bridge::config::TopicRegistry;
-use iggy_kafka_bridge::state::BridgeState;
+use iggy_kafka_proxy::backend::MockIggyBackend;
+use iggy_kafka_proxy::config::TopicRegistry;
+use iggy_kafka_proxy::state::BridgeState;
 use kafka_protocol::messages::*;
 use kafka_protocol::protocol::{Decodable, Encodable};
 use std::sync::Arc;
@@ -124,7 +124,7 @@ async fn test_tcp_wire_handshake_and_consume() {
                         if s.read_exact(&mut body).await.is_err() {
                             break;
                         }
-                        if let Ok(resp) = iggy_kafka_bridge::protocol::process_frame(Bytes::from(body), &st).await {
+                        if let Ok(resp) = iggy_kafka_proxy::protocol::process_frame(Bytes::from(body), &st).await {
                             if s.write_all(&resp).await.is_err() {
                                 break;
                             }

@@ -1,6 +1,6 @@
 //! Tests for topic registry loading and validation.
 
-use iggy_kafka_bridge::config::TopicRegistry;
+use iggy_kafka_proxy::config::TopicRegistry;
 use std::path::Path;
 
 #[test]

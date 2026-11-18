@@ -1,17 +1,17 @@
 [package]
-name = "iggy-kafka-bridge"
+name = "iggy-kafka-proxy"
 version = "0.1.0"
 edition = "2024"
 authors = ["FerrousCX Contributors"]
-description = "Pure-Rust Kafka wire protocol bridge to Apache Iggy streaming broker"
+description = "Pure-Rust Kafka wire protocol proxy for Apache Iggy streaming broker"
 license = "MIT"
 
 [lib]
-name = "iggy_kafka_bridge"
+name = "iggy_kafka_proxy"
 path = "src/lib.rs"
 
 [[bin]]
-name = "iggy-kafka-bridge"
+name = "iggy-kafka-proxy"
 path = "src/main.rs"
 
 [dependencies]

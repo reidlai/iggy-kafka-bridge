@@ -1421,7 +1421,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "iggy-kafka-bridge"
+name = "iggy-kafka-proxy"
 version = "0.1.0"
 dependencies = [
  "bytes",
