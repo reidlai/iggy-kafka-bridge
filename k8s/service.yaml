@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: iggy-kafka-bridge
+  namespace: ferrous-streaming
+  labels:
+    app.kubernetes.io/name: iggy-kafka-bridge
+    app.kubernetes.io/component: kafka-wire-bridge
+    app.kubernetes.io/part-of: ferrous-cx
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9093"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: iggy-kafka-bridge
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+      protocol: TCP
+    - name: metrics
+      port: 9093
+      targetPort: metrics
+      protocol: TCP

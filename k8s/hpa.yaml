@@ -1,0 +1,61 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iggy-kafka-bridge-hpa
+  namespace: ferrous-streaming
+  labels:
+    app.kubernetes.io/name: iggy-kafka-bridge
+    app.kubernetes.io/component: kafka-wire-bridge
+    app.kubernetes.io/part-of: ferrous-cx
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iggy-kafka-bridge
+  minReplicas: 2
+  maxReplicas: 10
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 15
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: bridge_inflight_requests
+        target:
+          type: AverageValue
+          averageValue: "32"
+    - type: Pods
+      pods:
+        metric:
+          name: bridge_records_per_second
+        target:
+          type: AverageValue
+          averageValue: "5000"

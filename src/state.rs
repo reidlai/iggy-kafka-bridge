@@ -15,8 +15,9 @@ use kafka_protocol::records::{Compression, Record, RecordBatchEncoder, RecordEnc
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::backend::IggyBackend;
+use crate::backend::{IggyBackend, DEFAULT_IGGY_POOL_SIZE};
 use crate::config::TopicRegistry;
+use crate::telemetry::BridgeMetrics;
 
 pub const ERROR_NONE: i16 = 0;
 pub const ERROR_OFFSET_OUT_OF_RANGE: i16 = 1;
@@ -30,6 +31,7 @@ pub struct BridgeState<B: IggyBackend> {
     pub node_id: i32,
     pub advertised_host: String,
     pub advertised_port: i32,
+    pub metrics: Arc<BridgeMetrics>,
 }
 
 impl<B: IggyBackend> BridgeState<B> {
@@ -40,12 +42,32 @@ impl<B: IggyBackend> BridgeState<B> {
         advertised_host: String,
         advertised_port: i32,
     ) -> Self {
+        let metrics = Arc::new(BridgeMetrics::new(node_id, DEFAULT_IGGY_POOL_SIZE));
         Self {
             backend,
             registry,
             node_id,
             advertised_host,
             advertised_port,
+            metrics,
+        }
+    }
+
+    pub fn with_metrics(
+        backend: Arc<B>,
+        registry: TopicRegistry,
+        node_id: i32,
+        advertised_host: String,
+        advertised_port: i32,
+        metrics: Arc<BridgeMetrics>,
+    ) -> Self {
+        Self {
+            backend,
+            registry,
+            node_id,
+            advertised_host,
+            advertised_port,
+            metrics,
         }
     }
 
@@ -72,7 +94,7 @@ impl<B: IggyBackend> BridgeState<B> {
             api.max_version = max_v;
             apis.push(api);
         }
-        resp.api_keys = apis.into();
+        resp.api_keys = apis;
         resp.throttle_time_ms = 0;
         if version >= 3 {
             resp.finalized_features_epoch = -1;
@@ -286,6 +308,7 @@ impl<B: IggyBackend> BridgeState<B> {
                                             if messages.is_empty() {
                                                 part_resp.records = None;
                                             } else {
+                                                self.metrics.record_fetched(messages.len() as u64);
                                                 let records: Vec<Record> = messages
                                                     .into_iter()
                                                     .map(|m| {
@@ -574,6 +597,7 @@ impl<B: IggyBackend> BridgeState<B> {
                                         part_resp.log_append_time_ms = -1;
                                         part_resp.log_start_offset = 0;
                                     } else {
+                                        let produced_count = messages.len() as u64;
                                         match self
                                             .backend
                                             .send_messages(
@@ -585,6 +609,7 @@ impl<B: IggyBackend> BridgeState<B> {
                                             .await
                                         {
                                             Ok(base_offset) => {
+                                                self.metrics.record_produced(produced_count);
                                                 part_resp.error_code = ERROR_NONE;
                                                 part_resp.base_offset = base_offset as i64;
                                                 part_resp.log_append_time_ms = -1;

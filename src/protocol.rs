@@ -4,7 +4,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use kafka_protocol::messages::*;
 use kafka_protocol::protocol::{Decodable, Encodable};
 use std::convert::TryFrom;
-use tracing::{debug, warn};
+use std::time::Instant;
+use tracing::{debug, info_span, warn, Instrument};
 
 use crate::backend::IggyBackend;
 use crate::state::BridgeState;
@@ -15,77 +16,134 @@ pub async fn process_frame<B: IggyBackend>(
     mut raw_frame: Bytes,
     state: &BridgeState<B>,
 ) -> Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
+    let start = Instant::now();
+    let _inflight_guard = state.metrics.begin_request();
+
     if raw_frame.len() < 4 {
+        state.metrics.record_request("Malformed", 0, true);
         return Err("Frame too short for Kafka header".into());
     }
 
     let api_key_raw = i16::from_be_bytes([raw_frame[0], raw_frame[1]]);
     let api_version = i16::from_be_bytes([raw_frame[2], raw_frame[3]]);
 
-    let api_key = ApiKey::try_from(api_key_raw)
-        .map_err(|_| format!("Unsupported ApiKey: {api_key_raw}"))?;
+    let api_key = match ApiKey::try_from(api_key_raw) {
+        Ok(k) => k,
+        Err(_) => {
+            state
+                .metrics
+                .record_request("Unknown", start.elapsed().as_micros() as u64, true);
+            return Err(format!("Unsupported ApiKey: {api_key_raw}").into());
+        }
+    };
+    let api_key_name = format!("{api_key:?}");
 
     let req_header_v = api_key.request_header_version(api_version);
     let res_header_v = api_key.response_header_version(api_version);
 
-    let req_header = RequestHeader::decode(&mut raw_frame, req_header_v)?;
-    debug!(
-        "Received Kafka request: key={:?}, version={}, correlation_id={}",
-        api_key, api_version, req_header.correlation_id
-    );
-
-    let req_kind = RequestKind::decode(api_key, &mut raw_frame, api_version)?;
-
-    let res_kind: ResponseKind = match req_kind {
-        RequestKind::ApiVersions(ref req) => {
-            let resp = state.handle_api_versions(req, api_version);
-            ResponseKind::ApiVersions(resp)
-        }
-        RequestKind::Metadata(ref req) => {
-            let resp = state.handle_metadata(req, api_version);
-            ResponseKind::Metadata(resp)
-        }
-        RequestKind::ListOffsets(ref req) => {
-            let resp = state.handle_list_offsets(req, api_version).await;
-            ResponseKind::ListOffsets(resp)
-        }
-        RequestKind::Fetch(ref req) => {
-            let resp = state.handle_fetch(req, api_version).await;
-            ResponseKind::Fetch(resp)
-        }
-        RequestKind::FindCoordinator(ref req) => {
-            let resp = state.handle_find_coordinator(req, api_version);
-            ResponseKind::FindCoordinator(resp)
-        }
-        RequestKind::OffsetCommit(ref req) => {
-            let resp = state.handle_offset_commit(req, api_version).await;
-            ResponseKind::OffsetCommit(resp)
-        }
-        RequestKind::OffsetFetch(ref req) => {
-            let resp = state.handle_offset_fetch(req, api_version).await;
-            ResponseKind::OffsetFetch(resp)
-        }
-        RequestKind::Produce(ref req) => {
-            let resp = state.handle_produce(req, api_version).await;
-            ResponseKind::Produce(resp)
-        }
-        other => {
-            warn!("Unhandled RequestKind: {:?}", other);
-            return Err(format!("Unhandled RequestKind: {:?}", api_key).into());
+    let req_header = match RequestHeader::decode(&mut raw_frame, req_header_v) {
+        Ok(h) => h,
+        Err(e) => {
+            state.metrics.record_request(
+                &api_key_name,
+                start.elapsed().as_micros() as u64,
+                true,
+            );
+            return Err(e.into());
         }
     };
 
-    let mut body_buf = BytesMut::new();
-    let mut res_header = ResponseHeader::default();
-    res_header.correlation_id = req_header.correlation_id;
-    res_header.encode(&mut body_buf, res_header_v)?;
-    res_kind.encode(&mut body_buf, api_version)?;
+    let span = info_span!(
+        "kafka.request",
+        otel.name = %api_key_name,
+        kafka.api_key = %api_key_name,
+        kafka.api_version = api_version,
+        kafka.correlation_id = req_header.correlation_id,
+        bridge.node_id = state.node_id
+    );
 
-    let mut frame = BytesMut::with_capacity(4 + body_buf.len());
-    frame.put_i32(body_buf.len() as i32);
-    frame.put(body_buf);
+    async move {
+        debug!(
+            "Received Kafka request: key={:?}, version={}, correlation_id={}",
+            api_key, api_version, req_header.correlation_id
+        );
 
-    Ok(frame.freeze())
+        let req_kind = match RequestKind::decode(api_key, &mut raw_frame, api_version) {
+            Ok(k) => k,
+            Err(e) => {
+                state.metrics.record_request(
+                    &api_key_name,
+                    start.elapsed().as_micros() as u64,
+                    true,
+                );
+                return Err(e.into());
+            }
+        };
+
+        let res_kind: ResponseKind = match req_kind {
+            RequestKind::ApiVersions(ref req) => {
+                let resp = state.handle_api_versions(req, api_version);
+                ResponseKind::ApiVersions(resp)
+            }
+            RequestKind::Metadata(ref req) => {
+                let resp = state.handle_metadata(req, api_version);
+                ResponseKind::Metadata(resp)
+            }
+            RequestKind::ListOffsets(ref req) => {
+                let resp = state.handle_list_offsets(req, api_version).await;
+                ResponseKind::ListOffsets(resp)
+            }
+            RequestKind::Fetch(ref req) => {
+                let resp = state.handle_fetch(req, api_version).await;
+                ResponseKind::Fetch(resp)
+            }
+            RequestKind::FindCoordinator(ref req) => {
+                let resp = state.handle_find_coordinator(req, api_version);
+                ResponseKind::FindCoordinator(resp)
+            }
+            RequestKind::OffsetCommit(ref req) => {
+                let resp = state.handle_offset_commit(req, api_version).await;
+                ResponseKind::OffsetCommit(resp)
+            }
+            RequestKind::OffsetFetch(ref req) => {
+                let resp = state.handle_offset_fetch(req, api_version).await;
+                ResponseKind::OffsetFetch(resp)
+            }
+            RequestKind::Produce(ref req) => {
+                let resp = state.handle_produce(req, api_version).await;
+                ResponseKind::Produce(resp)
+            }
+            other => {
+                warn!("Unhandled RequestKind: {:?}", other);
+                state.metrics.record_request(
+                    &api_key_name,
+                    start.elapsed().as_micros() as u64,
+                    true,
+                );
+                return Err(format!("Unhandled RequestKind: {:?}", api_key).into());
+            }
+        };
+
+        let mut body_buf = BytesMut::new();
+        let mut res_header = ResponseHeader::default();
+        res_header.correlation_id = req_header.correlation_id;
+        res_header.encode(&mut body_buf, res_header_v)?;
+        res_kind.encode(&mut body_buf, api_version)?;
+
+        let mut frame = BytesMut::with_capacity(4 + body_buf.len());
+        frame.put_i32(body_buf.len() as i32);
+        frame.put(body_buf);
+
+        state.metrics.record_request(
+            &api_key_name,
+            start.elapsed().as_micros() as u64,
+            false,
+        );
+
+        Ok(frame.freeze())
+    }
+    .instrument(span)
+    .await
 }
 
 #[cfg(test)]

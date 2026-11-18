@@ -22,7 +22,7 @@ WORKDIR /app
 
 COPY --from=builder /usr/src/iggy-kafka-bridge/target/release/iggy-kafka-bridge /app/iggy-kafka-bridge
 
-EXPOSE 9092
+EXPOSE 9092 9093
 
 ENTRYPOINT ["/app/iggy-kafka-bridge"]
 CMD ["--config", "/contracts/topics.yml"]

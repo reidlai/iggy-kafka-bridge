@@ -3,10 +3,13 @@
 use bytes::Bytes;
 use iggy::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::TopicRegistry;
+
+pub const DEFAULT_IGGY_POOL_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct BridgeMessage {
@@ -72,10 +75,18 @@ pub trait IggyBackend: Send + Sync {
     ) -> impl std::future::Future<Output = Result<u64, BridgeError>> + Send;
 }
 
-/// In-memory mock backend for deterministic unit and wire contract testing.
-#[derive(Clone, Default)]
+/// In-memory mock backend for deterministic unit, multi-replica, and wire contract testing.
+#[derive(Clone)]
 pub struct MockIggyBackend {
     inner: Arc<RwLock<MockState>>,
+    pool_slots: Arc<Vec<AtomicUsize>>,
+    next_slot: Arc<AtomicUsize>,
+}
+
+impl Default for MockIggyBackend {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Default)]
@@ -88,17 +99,45 @@ struct MockState {
 
 impl MockIggyBackend {
     pub fn new() -> Self {
+        Self::new_with_pool_size(DEFAULT_IGGY_POOL_SIZE)
+    }
+
+    pub fn new_with_pool_size(pool_size: usize) -> Self {
+        let size = pool_size.max(1);
+        let slots = (0..size).map(|_| AtomicUsize::new(0)).collect();
         Self {
             inner: Arc::new(RwLock::new(MockState::default())),
+            pool_slots: Arc::new(slots),
+            next_slot: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub async fn with_registry(registry: &TopicRegistry) -> Self {
-        let backend = Self::new();
+        Self::with_registry_and_pool_size(registry, DEFAULT_IGGY_POOL_SIZE).await
+    }
+
+    pub async fn with_registry_and_pool_size(registry: &TopicRegistry, pool_size: usize) -> Self {
+        let backend = Self::new_with_pool_size(pool_size);
         for t in &registry.topics {
             backend.add_topic(&t.stream, &t.topic, t.partitions).await;
         }
         backend
+    }
+
+    pub fn pool_size(&self) -> usize {
+        self.pool_slots.len()
+    }
+
+    pub fn pool_dispatch_counts(&self) -> Vec<usize> {
+        self.pool_slots
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    fn record_pool_dispatch(&self) {
+        let idx = self.next_slot.fetch_add(1, Ordering::Relaxed) % self.pool_slots.len();
+        self.pool_slots[idx].fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn add_topic(&self, stream: &str, topic: &str, partitions: u32) {
@@ -107,6 +146,7 @@ impl MockIggyBackend {
         state.topics.insert((stream.to_string(), topic.to_string()), p_vec);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
         stream: &str,
@@ -146,6 +186,7 @@ impl IggyBackend for MockIggyBackend {
         topic: &str,
         partition_id: u32,
     ) -> Result<(u64, u64), BridgeError> {
+        self.record_pool_dispatch();
         let state = self.inner.read().await;
         let partitions = state
             .topics
@@ -169,6 +210,7 @@ impl IggyBackend for MockIggyBackend {
         offset: u64,
         count: u32,
     ) -> Result<Vec<BridgeMessage>, BridgeError> {
+        self.record_pool_dispatch();
         let state = self.inner.read().await;
         let partitions = state
             .topics
@@ -195,6 +237,7 @@ impl IggyBackend for MockIggyBackend {
         partition_id: u32,
         offset: u64,
     ) -> Result<(), BridgeError> {
+        self.record_pool_dispatch();
         let mut state = self.inner.write().await;
         state.consumer_offsets.insert(
             (
@@ -215,6 +258,7 @@ impl IggyBackend for MockIggyBackend {
         topic: &str,
         partition_id: u32,
     ) -> Result<Option<u64>, BridgeError> {
+        self.record_pool_dispatch();
         let state = self.inner.read().await;
         Ok(state.consumer_offsets.get(&(
             group.to_string(),
@@ -231,6 +275,7 @@ impl IggyBackend for MockIggyBackend {
         partition_id: u32,
         messages: Vec<BridgeMessage>,
     ) -> Result<u64, BridgeError> {
+        self.record_pool_dispatch();
         let mut state = self.inner.write().await;
         let partitions = state
             .topics
@@ -250,8 +295,10 @@ impl IggyBackend for MockIggyBackend {
     }
 }
 
+/// Pooled native Apache Iggy TCP client backend for horizontally scalable bridge replicas (Story 16.1, FR-34).
 pub struct LiveIggyBackend {
-    client: Arc<TcpClient>,
+    clients: Vec<Arc<TcpClient>>,
+    next_idx: AtomicUsize,
 }
 
 impl LiveIggyBackend {
@@ -260,19 +307,47 @@ impl LiveIggyBackend {
         username: &str,
         password: &str,
     ) -> Result<Self, BridgeError> {
-        let config = TcpClientConfig {
-            server_address: server_address.to_string(),
-            ..Default::default()
-        };
-        let client = TcpClient::create(Arc::new(config))
-            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
-        client.connect().await
-            .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
-        client.login_user(username, password).await
-            .map_err(|e| BridgeError::Unauthorized(e.to_string()))?;
+        Self::connect_pool(server_address, username, password, DEFAULT_IGGY_POOL_SIZE).await
+    }
+
+    pub async fn connect_pool(
+        server_address: &str,
+        username: &str,
+        password: &str,
+        pool_size: usize,
+    ) -> Result<Self, BridgeError> {
+        let size = pool_size.max(1);
+        let mut clients = Vec::with_capacity(size);
+        for _ in 0..size {
+            let config = TcpClientConfig {
+                server_address: server_address.to_string(),
+                ..Default::default()
+            };
+            let client = TcpClient::create(Arc::new(config))
+                .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+            client
+                .connect()
+                .await
+                .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
+            client
+                .login_user(username, password)
+                .await
+                .map_err(|e| BridgeError::Unauthorized(e.to_string()))?;
+            clients.push(Arc::new(client));
+        }
         Ok(Self {
-            client: Arc::new(client),
+            clients,
+            next_idx: AtomicUsize::new(0),
         })
+    }
+
+    pub fn pool_size(&self) -> usize {
+        self.clients.len()
+    }
+
+    fn next_client(&self) -> &Arc<TcpClient> {
+        let idx = self.next_idx.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        &self.clients[idx]
     }
 }
 
@@ -288,7 +363,7 @@ impl IggyBackend for LiveIggyBackend {
         let topic_id = Identifier::named(topic)
             .map_err(|e| BridgeError::TopicNotFound(format!("{topic}: {e}")))?;
         let topic_details = self
-            .client
+            .next_client()
             .get_topic(&stream_id, &topic_id)
             .await
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?
@@ -319,7 +394,7 @@ impl IggyBackend for LiveIggyBackend {
         let consumer = Consumer::default();
         let strategy = PollingStrategy::offset(offset);
         let polled = self
-            .client
+            .next_client()
             .poll_messages(
                 &stream_id,
                 &topic_id,
@@ -375,7 +450,7 @@ impl IggyBackend for LiveIggyBackend {
             Identifier::named(group)
                 .map_err(|e| BridgeError::CommunicationError(e.to_string()))?,
         );
-        self.client
+        self.next_client()
             .store_consumer_offset(
                 &consumer,
                 &stream_id,
@@ -404,7 +479,7 @@ impl IggyBackend for LiveIggyBackend {
                 .map_err(|e| BridgeError::CommunicationError(e.to_string()))?,
         );
         match self
-            .client
+            .next_client()
             .get_consumer_offset(&consumer, &stream_id, &topic_id, Some(partition_id))
             .await
         {
@@ -451,14 +526,14 @@ impl IggyBackend for LiveIggyBackend {
             iggy_messages.push(iggy_msg);
         }
 
+        let client = self.next_client();
         let partitioning = Partitioning::partition_id(partition_id);
-        self.client
+        client
             .send_messages(&stream_id, &topic_id, &partitioning, &mut iggy_messages)
             .await
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?;
 
-        let topic_details = self
-            .client
+        let topic_details = client
             .get_topic(&stream_id, &topic_id)
             .await
             .map_err(|e| BridgeError::CommunicationError(e.to_string()))?

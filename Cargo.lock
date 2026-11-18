@@ -1409,6 +1409,7 @@ dependencies = [
  "indexmap 2.14.2",
  "kafka-protocol",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror",

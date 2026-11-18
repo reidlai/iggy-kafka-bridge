@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iggy-kafka-bridge
+  namespace: ferrous-streaming
+  labels:
+    app.kubernetes.io/name: iggy-kafka-bridge
+    app.kubernetes.io/component: kafka-wire-bridge
+    app.kubernetes.io/part-of: ferrous-cx
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iggy-kafka-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iggy-kafka-bridge
+        app.kubernetes.io/component: kafka-wire-bridge
+        app.kubernetes.io/part-of: ferrous-cx
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9093"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: iggy-kafka-bridge
+      containers:
+        - name: iggy-kafka-bridge
+          image: ghcr.io/reidlai/iggy-kafka-bridge:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config"
+            - "/contracts/topics.yml"
+          ports:
+            - name: kafka
+              containerPort: 9092
+              protocol: TCP
+            - name: metrics
+              containerPort: 9093
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: IGGY_SERVER_ADDRESS
+              value: "iggy-broker.ferrous-streaming.svc.cluster.local:8090"
+            - name: IGGY_USERNAME
+              value: "svc_kafka_bridge"
+            - name: IGGY_KAFKA_IGGY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: iggy-kafka-bridge-secret
+                  key: BRIDGE_IGGY_PASSWORD
+            - name: IGGY_CONNECTION_POOL_SIZE
+              value: "4"
+            - name: BRIDGE_BIND_COMPOSE
+              value: "0.0.0.0:9092"
+            - name: BRIDGE_ADVERTISED_COMPOSE_HOST
+              value: "iggy-kafka-bridge.ferrous-streaming.svc.cluster.local"
+            - name: BRIDGE_ADVERTISED_COMPOSE_PORT
+              value: "9092"
+            - name: BRIDGE_METRICS_ADDR
+              value: "0.0.0.0:9093"
+            - name: BRIDGE_LOG_FORMAT
+              value: "json"
+            - name: OTEL_SDK_DISABLED
+              value: "false"
+            - name: OTEL_SERVICE_NAME
+              value: "iggy-kafka-bridge"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.observability.svc.cluster.local:4317"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_METRICS_EXPORTER
+              value: "otlp"
+            - name: OTEL_LOGS_EXPORTER
+              value: "otlp"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "1000m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: topics-contract
+              mountPath: /contracts
+              readOnly: true
+      volumes:
+        - name: topics-contract
+          configMap:
+            name: ferrous-topics-contract
