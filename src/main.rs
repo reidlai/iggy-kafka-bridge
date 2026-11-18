@@ -92,9 +92,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let args = Args::parse();
 
+    let config_path = if (args.config == PathBuf::from("topics.yml") || !args.config.exists())
+        && let Ok(legacy_map) = std::env::var("IGGY_KAFKA_TOPIC_MAP_PATH")
+    {
+        PathBuf::from(legacy_map)
+    } else {
+        args.config.clone()
+    };
+
+    let iggy_addr = if args.iggy_address == "127.0.0.1:8090" {
+        std::env::var("IGGY_KAFKA_IGGY_ADDR").unwrap_or(args.iggy_address)
+    } else {
+        args.iggy_address
+    };
+
+    let iggy_user = if args.iggy_username == "bridge" {
+        std::env::var("BRIDGE_IGGY_USERNAME")
+            .or_else(|_| std::env::var("IGGY_KAFKA_IGGY_USERNAME"))
+            .unwrap_or(args.iggy_username)
+    } else {
+        args.iggy_username
+    };
+
+    let iggy_pw = if args.iggy_password == "bridge" {
+        std::env::var("BRIDGE_IGGY_PASSWORD")
+            .or_else(|_| std::env::var("IGGY_KAFKA_IGGY_PASSWORD"))
+            .unwrap_or(args.iggy_password)
+    } else {
+        args.iggy_password
+    };
+
+    let explicit_node_id = args.node_id.or_else(|| {
+        std::env::var("IGGY_KAFKA_NODE_ID").ok().and_then(|v| v.parse().ok())
+    });
+
+    let adv_host = if args.advertised_bridge_host == "bridge" {
+        std::env::var("IGGY_KAFKA_ADVERTISED_HOST")
+            .unwrap_or(args.advertised_bridge_host)
+    } else {
+        args.advertised_bridge_host
+    };
+
+    let adv_port = if args.advertised_bridge_port == 9092 {
+        std::env::var("IGGY_KAFKA_ADVERTISED_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(args.advertised_bridge_port)
+    } else {
+        args.advertised_bridge_port
+    };
+
     if args.healthcheck {
-        info!("Running healthcheck against Iggy broker at {}...", args.iggy_address);
-        match LiveIggyBackend::connect(&args.iggy_address, &args.iggy_username, &args.iggy_password).await {
+        info!("Running healthcheck against Iggy broker at {}...", iggy_addr);
+        match LiveIggyBackend::connect(&iggy_addr, &iggy_user, &iggy_pw).await {
             Ok(_) => {
                 info!("Healthcheck passed: successfully connected and authenticated to Iggy broker.");
                 std::process::exit(0);
@@ -107,11 +157,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let identity = resolve_replica_identity(
-        args.node_id,
+        explicit_node_id,
         args.pod_name.as_deref(),
-        &args.advertised_bridge_host,
+        &adv_host,
         args.pod_ip.as_deref(),
-        args.advertised_bridge_port,
+        adv_port,
     );
 
     info!(
@@ -124,20 +174,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "Initializing iggy-kafka-bridge replica..."
     );
 
-    info!("Loading topic registry from {:?}...", args.config);
-    let registry = TopicRegistry::load_from_file(&args.config)?;
+    info!("Loading topic registry from {:?}...", config_path);
+    let registry = TopicRegistry::load_from_file(&config_path)?;
     info!("Loaded {} topic definitions.", registry.topics.len());
 
     info!(
         "Connecting pool of {} client(s) to Iggy broker at {}...",
         args.pool_size.max(1),
-        args.iggy_address
+        iggy_addr
     );
     let backend = Arc::new(
         LiveIggyBackend::connect_pool(
-            &args.iggy_address,
-            &args.iggy_username,
-            &args.iggy_password,
+            &iggy_addr,
+            &iggy_user,
+            &iggy_pw,
             args.pool_size,
         )
         .await?,

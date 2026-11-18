@@ -31,12 +31,64 @@ pub struct KafkaTopicPermissions {
     pub produce: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TomlTopicMap {
+    pub default_stream: Option<String>,
+    #[serde(default)]
+    pub topics: HashMap<String, TomlTopicEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TomlTopicEntry {
+    pub stream: String,
+    pub topic: String,
+    pub partitions: Option<u32>,
+}
+
 impl TopicRegistry {
-    /// Loads topic registry from YAML file (e.g. ferrous-cx/contracts/topics.yml).
+    /// Loads topic registry from YAML or TOML file (e.g. ferrous-cx/contracts/topics.yml or topic-map.toml).
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let content = std::fs::read_to_string(path)?;
-        let registry: TopicRegistry = serde_yaml::from_str(&content)?;
-        Ok(registry)
+        let content = std::fs::read_to_string(path.as_ref())?;
+        if path.as_ref().extension().and_then(|ext| ext.to_str()) == Some("toml") {
+            if let Ok(toml_map) = toml::from_str::<TomlTopicMap>(&content) {
+                return Ok(Self::from_toml_map(toml_map));
+            }
+        }
+        match serde_yaml::from_str::<TopicRegistry>(&content) {
+            Ok(registry) => Ok(registry),
+            Err(yaml_err) => {
+                // Fallback to TOML parser if YAML failed
+                if let Ok(toml_map) = toml::from_str::<TomlTopicMap>(&content) {
+                    Ok(Self::from_toml_map(toml_map))
+                } else {
+                    Err(yaml_err.into())
+                }
+            }
+        }
+    }
+
+    fn from_toml_map(toml_map: TomlTopicMap) -> Self {
+        let mut topics = Vec::new();
+        for (kafka_name, entry) in toml_map.topics {
+            topics.push(TopicEntry {
+                stream: entry.stream,
+                topic: entry.topic,
+                kafka_name: kafka_name.clone(),
+                partitions: entry.partitions.unwrap_or(4),
+                retention: None,
+                durability: Some("persisted".into()),
+                kafka: KafkaTopicPermissions {
+                    consume: vec![
+                        "cg-arroyo-raw".into(),
+                        "cg-arroyo-state".into(),
+                        "cg-arroyo-olist".into(),
+                        "cg-arroyo-benchmark".into(),
+                    ],
+                    produce: true,
+                },
+            });
+        }
+        Self { version: 1, topics }
     }
 
     /// Loads topic registry from YAML string slice.

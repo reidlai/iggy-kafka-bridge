@@ -20,3 +20,27 @@ fn test_load_real_contracts_topics_yml() {
     assert!(registry.is_produce_allowed("olist.orders_stream"));
     assert!(!registry.is_produce_allowed("orders.intake"));
 }
+
+#[test]
+fn test_load_toml_topic_map() {
+    let toml_content = r#"
+default_stream = "kafka"
+
+[topics."benchmark.hpc_mqbench"]
+stream = "benchmark"
+topic  = "hpc_mqbench"
+
+[topics."orders.intake"]
+stream = "orders"
+topic  = "intake"
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toml_path = temp_dir.path().join("topic-map.toml");
+    std::fs::write(&toml_path, toml_content).unwrap();
+
+    let registry = TopicRegistry::load_from_file(&toml_path).expect("Failed to load topic-map.toml");
+    assert_eq!(registry.version, 1);
+    assert_eq!(registry.topics.len(), 2);
+    assert!(registry.is_consume_allowed("orders.intake", "cg-arroyo-raw"));
+    assert!(registry.is_produce_allowed("benchmark.hpc_mqbench"));
+}
